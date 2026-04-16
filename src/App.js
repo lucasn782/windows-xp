@@ -263,6 +263,7 @@ export default function WindowsXP() {
     return () => clearTimeout(bootTimer);
   }, [screen]);
 
+  /* eslint-disable react-hooks/exhaustive-deps */
   useEffect(() => {
     if (screen !== 'welcome') return undefined;
 
@@ -276,7 +277,7 @@ export default function WindowsXP() {
 
     const welcomeTimer = setTimeout(() => setScreen('desktop'), 2200);
     return () => clearTimeout(welcomeTimer);
-  }, [playSound, screen]);
+  }, [screen]);
 
   useEffect(() => {
     if (screen !== 'loggingOff') return undefined;
@@ -284,7 +285,7 @@ export default function WindowsXP() {
     playSound('logoff');
     const logoffTimer = setTimeout(() => setScreen('login'), 2100);
     return () => clearTimeout(logoffTimer);
-  }, [playSound, screen]);
+  }, [screen]);
 
   useEffect(() => {
     if (screen !== 'shutdown') {
@@ -295,7 +296,8 @@ export default function WindowsXP() {
     playSound('shutdown');
     const shutdownTimer = setTimeout(() => setShutdownComplete(true), 2600);
     return () => clearTimeout(shutdownTimer);
-  }, [playSound, screen]);
+  }, [screen]);
+  /* eslint-enable react-hooks/exhaustive-deps */
 
   useEffect(() => {
     if (!shutdownComplete) return undefined;
