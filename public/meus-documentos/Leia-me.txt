@@ -1,0 +1,22 @@
+Windows XP React
+================
+
+Esta aplicacao recria uma experiencia inspirada no Windows XP usando React e Tailwind CSS.
+
+Recursos principais:
+- tela de boot
+- login com usuario e senha
+- tela de boas-vindas
+- area de trabalho com barra de tarefas
+- janelas arrastaveis
+- menu iniciar
+- pasta "Meus Documentos" com arquivos reais
+- Bloco de Notas capaz de abrir arquivos .txt
+
+GitHub
+------
+
+Lucas Neves compartilha projetos e experimentos de desenvolvimento no GitHub, com foco em interfaces, estudos e aplicacoes web.
+
+Perfil:
+https://github.com/lucasn782

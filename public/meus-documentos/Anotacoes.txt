@@ -1,0 +1,8 @@
+Anotacoes do Sistema
+====================
+
+- Usuario padrao: admin
+- Senha padrao: 12345
+- O botao "Log Off" retorna para a tela de login
+- O botao "Turn Off" mostra a despedida do sistema
+- Os documentos desta pasta podem ser abertos no Bloco de Notas

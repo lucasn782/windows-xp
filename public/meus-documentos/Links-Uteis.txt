@@ -1,0 +1,13 @@
+Links Uteis
+===========
+
+Projeto:
+- Interface inspirada no Windows XP
+
+Perfil do GitHub:
+- https://github.com/lucasn782
+
+Ideias para evolucao:
+- adicionar mais programas
+- melhorar a calculadora sem usar eval
+- permitir renomear arquivos
