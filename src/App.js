@@ -8,12 +8,14 @@ const WINDOW_HEIGHT = 400;
 const LOGIN_USERNAME = 'admin';
 const LOGIN_PASSWORD = '12345';
 const HAS_LOGGED_IN_KEY = 'xp_has_logged_in';
+const PUBLIC_URL = process.env.PUBLIC_URL || '';
+const withPublicUrl = (path) => `${PUBLIC_URL}${path}`;
 
 const SYSTEM_SOUNDS = {
-  startup: '/sounds/startup.mp3',
-  logon: '/sounds/logon.mp3',
-  logoff: '/sounds/logoff.mp3',
-  shutdown: '/sounds/shutdown.mp3',
+  startup: withPublicUrl('/sounds/startup.mp3'),
+  logon: withPublicUrl('/sounds/logon.mp3'),
+  logoff: withPublicUrl('/sounds/logoff.mp3'),
+  shutdown: withPublicUrl('/sounds/shutdown.mp3'),
 };
 
 const PROGRAMS = {
@@ -30,9 +32,9 @@ const ROOT_ITEMS = [
 ];
 
 const DOCUMENT_FILES = [
-  { id: 'readme', name: 'Leia-me.txt', icon: '📄', path: '/meus-documentos/Leia-me.txt' },
-  { id: 'notes', name: 'Anotacoes.txt', icon: '📄', path: '/meus-documentos/Anotacoes.txt' },
-  { id: 'links', name: 'Links-Uteis.txt', icon: '📄', path: '/meus-documentos/Links-Uteis.txt' },
+  { id: 'readme', name: 'Leia-me.txt', icon: '📄', path: withPublicUrl('/meus-documentos/Leia-me.txt') },
+  { id: 'notes', name: 'Anotacoes.txt', icon: '📄', path: withPublicUrl('/meus-documentos/Anotacoes.txt') },
+  { id: 'links', name: 'Links-Uteis.txt', icon: '📄', path: withPublicUrl('/meus-documentos/Links-Uteis.txt') },
 ];
 
 const PROGRAM_ICONS = {
