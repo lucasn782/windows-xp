@@ -54,6 +54,72 @@ const createWindowPosition = (index) => ({
   y: 60 + ((index % 6) * 24),
 });
 
+function evaluateExpression(expression) {
+  const normalized = expression.replace(/\s+/g, '');
+
+  if (!/^[\d.+\-*/]+$/.test(normalized)) {
+    return 'Erro';
+  }
+
+  const tokens = normalized.match(/\d*\.?\d+|[+\-*/]/g);
+  if (!tokens) return 'Erro';
+
+  const values = [];
+  const operators = [];
+  const precedence = { '+': 1, '-': 1, '*': 2, '/': 2 };
+
+  const applyOperation = () => {
+    const operator = operators.pop();
+    const right = values.pop();
+    const left = values.pop();
+
+    if (operator == null || left == null || right == null) {
+      throw new Error('Invalid expression');
+    }
+
+    switch (operator) {
+      case '+':
+        values.push(left + right);
+        break;
+      case '-':
+        values.push(left - right);
+        break;
+      case '*':
+        values.push(left * right);
+        break;
+      case '/':
+        values.push(right === 0 ? Number.NaN : left / right);
+        break;
+      default:
+        throw new Error('Unsupported operator');
+    }
+  };
+
+  for (const token of tokens) {
+    if (precedence[token]) {
+      while (
+        operators.length
+        && precedence[operators[operators.length - 1]] >= precedence[token]
+      ) {
+        applyOperation();
+      }
+      operators.push(token);
+    } else {
+      values.push(Number(token));
+    }
+  }
+
+  while (operators.length) {
+    applyOperation();
+  }
+
+  if (values.length !== 1 || Number.isNaN(values[0]) || !Number.isFinite(values[0])) {
+    return 'Erro';
+  }
+
+  return String(values[0]);
+}
+
 function Window({ id, title, icon, children, onClose, onFocus, zIndex, active, initialPosition, taskbarHeight }) {
   const [pos, setPos] = useState(initialPosition);
   const [isDragging, setIsDragging] = useState(false);
@@ -210,7 +276,7 @@ export default function WindowsXP() {
 
     const welcomeTimer = setTimeout(() => setScreen('desktop'), 2200);
     return () => clearTimeout(welcomeTimer);
-  }, [screen]);
+  }, [playSound, screen]);
 
   useEffect(() => {
     if (screen !== 'loggingOff') return undefined;
@@ -218,7 +284,7 @@ export default function WindowsXP() {
     playSound('logoff');
     const logoffTimer = setTimeout(() => setScreen('login'), 2100);
     return () => clearTimeout(logoffTimer);
-  }, [screen]);
+  }, [playSound, screen]);
 
   useEffect(() => {
     if (screen !== 'shutdown') {
@@ -229,7 +295,7 @@ export default function WindowsXP() {
     playSound('shutdown');
     const shutdownTimer = setTimeout(() => setShutdownComplete(true), 2600);
     return () => clearTimeout(shutdownTimer);
-  }, [screen]);
+  }, [playSound, screen]);
 
   useEffect(() => {
     if (!shutdownComplete) return undefined;
@@ -840,6 +906,19 @@ function StartMenu({ openWindow, openBlankNotepad, openControlPanel, onLogOff, o
 function Calculator() {
   const [val, setVal] = useState('0');
   const addDigit = (digit) => setVal((prev) => (prev === '0' ? String(digit) : prev + digit));
+  const handleCalculatorInput = (button) => {
+    if (button === 'C') {
+      setVal('0');
+      return;
+    }
+
+    if (button === '=') {
+      setVal((prev) => evaluateExpression(prev));
+      return;
+    }
+
+    addDigit(button);
+  };
 
   return (
     <div className="p-4 bg-[#ECE9D8] h-full flex flex-col gap-2 select-none">
@@ -849,7 +928,7 @@ function Calculator() {
           <button
             type="button"
             key={btn}
-            onClick={() => (btn === 'C' ? setVal('0') : btn === '=' ? setVal(eval(val)) : addDigit(btn))}
+            onClick={() => handleCalculatorInput(btn)}
             className="border shadow-sm active:shadow-inner bg-[#F5F5F5] hover:bg-white text-blue-800 font-bold"
           >
             {btn}
