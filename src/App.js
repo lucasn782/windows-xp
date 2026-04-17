@@ -16,6 +16,9 @@ const PUBLIC_URL = process.env.PUBLIC_URL || '';
 const withPublicUrl = (path) => `${PUBLIC_URL}${path}`;
 const DEFAULT_BROWSER_HOME = 'https://www.google.com/webhp?igu=1';
 const DEFAULT_SEARCH_URL = 'https://www.google.com/search?igu=1&q=';
+const WINDOW_TRANSITION_MS = 240;
+const START_MENU_TRANSITION_MS = 220;
+const TAB_CLOSE_TRANSITION_MS = 180;
 
 const SYSTEM_SOUNDS = {
   startup: withPublicUrl('/sounds/startup.mp3'),
@@ -260,12 +263,15 @@ function Window({
   icon,
   children,
   onClose,
+  onMinimize,
   onFocus,
   zIndex,
   active,
   initialPosition,
   initialSize,
   taskbarHeight,
+  isMinimized,
+  isClosing,
 }) {
   const [bounds, setBounds] = useState(() => clampWindowBounds({
     x: initialPosition.x,
@@ -277,6 +283,7 @@ function Window({
   const dragRef = useRef(null);
   const resizeRef = useRef(null);
   const restoreBoundsRef = useRef(bounds);
+  const isInteracting = Boolean(dragRef.current || resizeRef.current);
 
   useEffect(() => {
     setBounds(clampWindowBounds({
@@ -418,7 +425,24 @@ function Window({
   return (
     <div
       className={`absolute shadow-2xl border-2 border-[#0054E3] ${isMaximized ? '' : 'rounded-t-lg'} bg-[#ECE9D8] flex flex-col overflow-hidden ${active ? 'ring-1 ring-blue-400' : ''}`}
-      style={{ left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height, zIndex }}
+      style={{
+        left: bounds.x,
+        top: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        zIndex,
+        opacity: isMinimized || isClosing ? 0 : 1,
+        pointerEvents: isMinimized || isClosing ? 'none' : 'auto',
+        transform: isMinimized
+          ? 'translateY(28px) scale(0.88)'
+          : isClosing
+            ? 'scale(0.94)'
+            : 'translateY(0) scale(1)',
+        transformOrigin: 'center bottom',
+        transition: isInteracting
+          ? 'none'
+          : `left ${WINDOW_TRANSITION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), top ${WINDOW_TRANSITION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), width ${WINDOW_TRANSITION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), height ${WINDOW_TRANSITION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), transform ${WINDOW_TRANSITION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity ${Math.max(160, WINDOW_TRANSITION_MS - 20)}ms ease`,
+      }}
       onMouseDown={() => onFocus(id)}
     >
       <div
@@ -434,7 +458,11 @@ function Window({
           <button
             type="button"
             className="w-5 h-5 bg-[#0054E3] border border-white text-white flex items-center justify-center text-xs hover:bg-blue-400 font-bold"
-            onClick={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onMinimize();
+            }}
+            aria-label="Minimizar janela"
           >
             _
           </button>
@@ -478,6 +506,8 @@ export default function WindowsXP() {
   const [windows, setWindows] = useState([]);
   const [activeWindow, setActiveWindow] = useState(null);
   const [isStartOpen, setIsStartOpen] = useState(false);
+  const [isStartMenuMounted, setIsStartMenuMounted] = useState(false);
+  const [isStartMenuVisible, setIsStartMenuVisible] = useState(false);
   const [time, setTime] = useState(new Date());
   const [credentials, setCredentials] = useState({ username: '', password: '' });
   const [loginError, setLoginError] = useState('');
@@ -506,6 +536,7 @@ export default function WindowsXP() {
   const nextZIndex = useRef(INITIAL_Z_INDEX);
   const soundCacheRef = useRef({});
   const hasLoggedInRef = useRef(localStorage.getItem(HAS_LOGGED_IN_KEY) === 'true');
+  const closeWindowTimersRef = useRef({});
   const taskbarHeight = taskbarTall ? TALL_TASKBAR_HEIGHT : DEFAULT_TASKBAR_HEIGHT;
 
   const playSound = useEffectEvent((name) => {
@@ -591,11 +622,35 @@ export default function WindowsXP() {
     return () => clearTimeout(closeTimer);
   }, [shutdownComplete]);
 
+  useEffect(() => {
+    if (isStartOpen) {
+      setIsStartMenuMounted(true);
+      const frame = window.requestAnimationFrame(() => setIsStartMenuVisible(true));
+      return () => window.cancelAnimationFrame(frame);
+    }
+
+    setIsStartMenuVisible(false);
+    if (!isStartMenuMounted) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => setIsStartMenuMounted(false), START_MENU_TRANSITION_MS);
+    return () => window.clearTimeout(timer);
+  }, [isStartMenuMounted, isStartOpen]);
+
+  useEffect(() => () => {
+    Object.values(closeWindowTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+  }, []);
+
   const resetDesktopState = () => {
+    Object.values(closeWindowTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+    closeWindowTimersRef.current = {};
     const initialTab = createBrowserTab();
     setWindows([]);
     setActiveWindow(null);
     setIsStartOpen(false);
+    setIsStartMenuMounted(false);
+    setIsStartMenuVisible(false);
     setExplorerView('root');
     setControlMessage('Use os botoes para ajustar o sistema.');
     setNotepadState({
@@ -709,7 +764,8 @@ export default function WindowsXP() {
     const existingWindow = windows.find((win) => win.type === type);
 
     if (existingWindow) {
-      handleFocus(existingWindow.id);
+      if (existingWindow.isClosing) return;
+      restoreWindow(existingWindow.id);
       return;
     }
 
@@ -720,6 +776,8 @@ export default function WindowsXP() {
       zIndex: nextZIndex.current,
       initialPosition: createWindowPosition(windows.length),
       initialSize: createWindowSize(type),
+      isMinimized: false,
+      isClosing: false,
     };
 
     setWindows((prev) => [...prev, newWindow]);
@@ -728,16 +786,70 @@ export default function WindowsXP() {
   };
 
   const closeWindow = (id) => {
-    setWindows((prev) => prev.filter((win) => win.id !== id));
+    setWindows((prev) => prev.map((win) => (
+      win.id === id ? { ...win, isClosing: true, isMinimized: false } : win
+    )));
     setActiveWindow((prev) => (prev === id ? null : prev));
+    if (closeWindowTimersRef.current[id]) {
+      window.clearTimeout(closeWindowTimersRef.current[id]);
+    }
+    closeWindowTimersRef.current[id] = window.setTimeout(() => {
+      setWindows((prev) => prev.filter((win) => win.id !== id));
+      delete closeWindowTimersRef.current[id];
+    }, WINDOW_TRANSITION_MS);
   };
 
   const handleFocus = (id) => {
     nextZIndex.current += 1;
     setActiveWindow(id);
     setWindows((prev) => prev.map((win) => (
-      win.id === id ? { ...win, zIndex: nextZIndex.current } : win
+      win.id === id ? {
+        ...win,
+        zIndex: nextZIndex.current,
+        isMinimized: false,
+        isClosing: false,
+      } : win
     )));
+  };
+
+  const minimizeWindow = (id) => {
+    setWindows((prev) => prev.map((win) => (
+      win.id === id ? { ...win, isMinimized: true } : win
+    )));
+    setActiveWindow((prev) => (prev === id ? null : prev));
+  };
+
+  const restoreWindow = (id) => {
+    nextZIndex.current += 1;
+    setWindows((prev) => prev.map((win) => (
+      win.id === id
+        ? {
+          ...win,
+          zIndex: nextZIndex.current,
+          isMinimized: false,
+          isClosing: false,
+        }
+        : win
+    )));
+    setActiveWindow(id);
+    setIsStartOpen(false);
+  };
+
+  const handleTaskbarWindowClick = (id) => {
+    const targetWindow = windows.find((win) => win.id === id);
+    if (!targetWindow || targetWindow.isClosing) return;
+
+    if (targetWindow.isMinimized) {
+      restoreWindow(id);
+      return;
+    }
+
+    if (activeWindow === id) {
+      minimizeWindow(id);
+      return;
+    }
+
+    handleFocus(id);
   };
 
   const openBlankNotepad = () => {
@@ -1088,9 +1200,12 @@ export default function WindowsXP() {
           initialPosition={win.initialPosition}
           initialSize={win.initialSize}
           onClose={() => closeWindow(win.id)}
+          onMinimize={() => minimizeWindow(win.id)}
           onFocus={handleFocus}
           zIndex={win.zIndex}
           taskbarHeight={taskbarHeight}
+          isMinimized={Boolean(win.isMinimized)}
+          isClosing={Boolean(win.isClosing)}
         >
           {renderAppContent(win.type)}
         </Window>
@@ -1109,8 +1224,8 @@ export default function WindowsXP() {
           {windows.map((win) => (
             <div
               key={win.id}
-              className={`px-3 py-1 text-xs text-white border border-blue-800 rounded min-w-[100px] cursor-pointer truncate ${activeWindow === win.id ? 'bg-[#1E50BD] shadow-inner' : 'bg-[#3C81F3]'}`}
-              onClick={() => handleFocus(win.id)}
+              className={`px-3 py-1 text-xs text-white border border-blue-800 rounded min-w-[100px] cursor-pointer truncate transition-all duration-200 ${activeWindow === win.id && !win.isMinimized ? 'bg-[#1E50BD] shadow-inner' : 'bg-[#3C81F3]'} ${win.isMinimized ? 'opacity-80 translate-y-[1px]' : 'opacity-100'}`}
+              onClick={() => handleTaskbarWindowClick(win.id)}
             >
               {win.type === PROGRAMS.NOTEPAD ? notepadState.title : win.type}
             </div>
@@ -1123,7 +1238,7 @@ export default function WindowsXP() {
         </div>
       </div>
 
-      {isStartOpen && (
+      {isStartMenuMounted && (
         <StartMenu
           openWindow={openWindow}
           openBlankNotepad={openBlankNotepad}
@@ -1131,6 +1246,7 @@ export default function WindowsXP() {
           onLogOff={handleLogOff}
           onTurnOff={handleTurnOff}
           taskbarHeight={taskbarHeight}
+          isOpen={isStartMenuVisible}
         />
       )}
     </div>
@@ -1305,10 +1421,28 @@ function BrowserWindow({
   onNewTab,
   onCloseTab,
 }) {
+  const [closingTabIds, setClosingTabIds] = useState([]);
+  const closeTabTimersRef = useRef({});
+
+  useEffect(() => () => {
+    Object.values(closeTabTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+  }, []);
+
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!activeTab) return;
     onNavigate(activeTab.id, activeTab.addressInput);
+  };
+
+  const beginCloseTab = (tabId) => {
+    if (closeTabTimersRef.current[tabId]) return;
+
+    setClosingTabIds((prev) => [...prev, tabId]);
+    closeTabTimersRef.current[tabId] = window.setTimeout(() => {
+      onCloseTab(tabId);
+      setClosingTabIds((prev) => prev.filter((currentId) => currentId !== tabId));
+      delete closeTabTimersRef.current[tabId];
+    }, TAB_CLOSE_TRANSITION_MS);
   };
 
   if (!activeTab) {
@@ -1321,9 +1455,9 @@ function BrowserWindow({
         {browserState.tabs.map((tab) => (
           <div
             key={tab.id}
-            className={`min-w-[140px] max-w-[220px] flex items-center gap-2 px-3 py-2 border border-b-0 rounded-t-md text-xs cursor-pointer ${
+            className={`min-w-[140px] max-w-[220px] flex items-center gap-2 px-3 py-2 border border-b-0 rounded-t-md text-xs cursor-pointer origin-bottom transition-all duration-200 ${
               tab.id === activeTab.id ? 'bg-white border-[#cfc4a6]' : 'bg-[#ddd4bc] border-[#beb396]'
-            }`}
+            } ${closingTabIds.includes(tab.id) ? 'opacity-0 scale-90 -translate-y-2 max-w-0 min-w-0 px-0 py-0 border-transparent overflow-hidden pointer-events-none' : 'opacity-100 scale-100 translate-y-0'}`}
             onClick={() => onSelectTab(tab.id)}
           >
             <span className="truncate flex-1">{tab.title}</span>
@@ -1332,7 +1466,7 @@ function BrowserWindow({
               className="w-4 h-4 text-[10px] border border-[#8d8168] bg-[#f7f1df] hover:bg-[#fff8eb]"
               onClick={(e) => {
                 e.stopPropagation();
-                onCloseTab(tab.id);
+                beginCloseTab(tab.id);
               }}
               aria-label={`Fechar ${tab.title}`}
             >
@@ -1629,9 +1763,20 @@ function DesktopIcon({ icon, label, onClick }) {
   );
 }
 
-function StartMenu({ openWindow, openBlankNotepad, openControlPanel, onLogOff, onTurnOff, taskbarHeight }) {
+function StartMenu({
+  openWindow,
+  openBlankNotepad,
+  openControlPanel,
+  onLogOff,
+  onTurnOff,
+  taskbarHeight,
+  isOpen,
+}) {
   return (
-    <div className="absolute left-0 w-80 bg-white rounded-t-lg shadow-2xl flex flex-col border-2 border-blue-600 z-[1000] overflow-hidden" style={{ bottom: `${taskbarHeight}px` }}>
+    <div
+      className={`absolute left-0 w-80 bg-white rounded-t-lg shadow-2xl flex flex-col border-2 border-blue-600 z-[1000] overflow-hidden transition-all duration-200 ${isOpen ? 'opacity-100 translate-y-0 pointer-events-auto' : 'opacity-0 translate-y-6 pointer-events-none'}`}
+      style={{ bottom: `${taskbarHeight}px` }}
+    >
       <div className="bg-gradient-to-r from-[#1D5ADA] to-[#428EFF] p-4 flex items-center gap-3 border-b border-blue-400">
         <div className="w-10 h-10 bg-orange-400 border-2 border-white rounded shadow-md" />
         <span className="text-white font-bold text-lg drop-shadow-md">Administrador</span>
