@@ -5,11 +5,17 @@ const DEFAULT_TASKBAR_HEIGHT = 40;
 const TALL_TASKBAR_HEIGHT = 52;
 const WINDOW_WIDTH = 600;
 const WINDOW_HEIGHT = 400;
+const MIN_WINDOW_WIDTH = 320;
+const MIN_WINDOW_HEIGHT = 220;
 const LOGIN_USERNAME = 'admin';
 const LOGIN_PASSWORD = '12345';
 const HAS_LOGGED_IN_KEY = 'xp_has_logged_in';
+const USER_DOCUMENTS_KEY = 'xp_user_documents';
+const RECYCLE_BIN_KEY = 'xp_recycle_bin';
 const PUBLIC_URL = process.env.PUBLIC_URL || '';
 const withPublicUrl = (path) => `${PUBLIC_URL}${path}`;
+const DEFAULT_BROWSER_HOME = 'https://www.google.com/webhp?igu=1';
+const DEFAULT_SEARCH_URL = 'https://www.google.com/search?igu=1&q=';
 
 const SYSTEM_SOUNDS = {
   startup: withPublicUrl('/sounds/startup.mp3'),
@@ -55,6 +61,132 @@ const createWindowPosition = (index) => ({
   x: 90 + ((index % 6) * 28),
   y: 60 + ((index % 6) * 24),
 });
+
+function createWindowSize(type) {
+  switch (type) {
+    case PROGRAMS.NOTEPAD:
+      return { width: 640, height: 460 };
+    case PROGRAMS.MY_COMPUTER:
+    case PROGRAMS.TRASH:
+      return { width: 720, height: 460 };
+    case PROGRAMS.IE:
+      return { width: 760, height: 520 };
+    case PROGRAMS.CALC:
+      return { width: 330, height: 420 };
+    default:
+      return { width: WINDOW_WIDTH, height: WINDOW_HEIGHT };
+  }
+}
+
+function getViewportBounds(taskbarHeight) {
+  return {
+    width: window.innerWidth,
+    height: Math.max(MIN_WINDOW_HEIGHT, window.innerHeight - taskbarHeight),
+  };
+}
+
+function clampWindowBounds(bounds, taskbarHeight) {
+  const viewport = getViewportBounds(taskbarHeight);
+  const width = Math.min(Math.max(MIN_WINDOW_WIDTH, bounds.width), viewport.width);
+  const height = Math.min(Math.max(MIN_WINDOW_HEIGHT, bounds.height), viewport.height);
+  const maxX = Math.max(0, viewport.width - width);
+  const maxY = Math.max(0, viewport.height - height);
+
+  return {
+    x: Math.min(Math.max(0, bounds.x), maxX),
+    y: Math.min(Math.max(0, bounds.y), maxY),
+    width,
+    height,
+  };
+}
+
+function getMaximizedBounds(taskbarHeight) {
+  const viewport = getViewportBounds(taskbarHeight);
+  return {
+    x: 0,
+    y: 0,
+    width: viewport.width,
+    height: viewport.height,
+  };
+}
+
+function sanitizeFileName(name) {
+  const trimmed = name.trim().replace(/[<>:"/\\|?*]+/g, '');
+  if (!trimmed) return '';
+  return trimmed.toLowerCase().endsWith('.txt') ? trimmed : `${trimmed}.txt`;
+}
+
+function loadStoredItems(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function getSearchUrl(query) {
+  return `${DEFAULT_SEARCH_URL}${encodeURIComponent(query)}`;
+}
+
+function looksLikeUrl(value) {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+
+  return (
+    /^https?:\/\//i.test(trimmed)
+    || /^localhost(?::\d+)?(\/.*)?$/i.test(trimmed)
+    || /^[\w-]+(\.[\w-]+)+([/?#].*)?$/i.test(trimmed)
+  );
+}
+
+function normalizeBrowserDestination(value) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return DEFAULT_BROWSER_HOME;
+  }
+
+  if (!looksLikeUrl(trimmed)) {
+    return getSearchUrl(trimmed);
+  }
+
+  const candidate = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+
+  try {
+    const parsed = new URL(candidate);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return getSearchUrl(trimmed);
+    }
+
+    return parsed.toString();
+  } catch (error) {
+    return getSearchUrl(trimmed);
+  }
+}
+
+function getBrowserTabTitle(url, index) {
+  try {
+    const { hostname } = new URL(url);
+    return hostname.replace(/^www\./i, '') || `Aba ${index + 1}`;
+  } catch (error) {
+    return `Aba ${index + 1}`;
+  }
+}
+
+function createBrowserTab(url = DEFAULT_BROWSER_HOME, index = 0) {
+  const normalizedUrl = normalizeBrowserDestination(url);
+
+  return {
+    id: Date.now() + Math.floor(Math.random() * 100000) + index,
+    title: getBrowserTabTitle(normalizedUrl, index),
+    addressInput: normalizedUrl,
+    currentUrl: normalizedUrl,
+    history: [normalizedUrl],
+    historyIndex: 0,
+  };
+}
 
 function evaluateExpression(expression) {
   const normalized = expression.replace(/\s+/g, '');
@@ -122,35 +254,96 @@ function evaluateExpression(expression) {
   return String(values[0]);
 }
 
-function Window({ id, title, icon, children, onClose, onFocus, zIndex, active, initialPosition, taskbarHeight }) {
-  const [pos, setPos] = useState(initialPosition);
-  const [isDragging, setIsDragging] = useState(false);
-  const offset = useRef({ x: 0, y: 0 });
+function Window({
+  id,
+  title,
+  icon,
+  children,
+  onClose,
+  onFocus,
+  zIndex,
+  active,
+  initialPosition,
+  initialSize,
+  taskbarHeight,
+}) {
+  const [bounds, setBounds] = useState(() => clampWindowBounds({
+    x: initialPosition.x,
+    y: initialPosition.y,
+    width: initialSize.width,
+    height: initialSize.height,
+  }, taskbarHeight));
+  const [isMaximized, setIsMaximized] = useState(false);
+  const dragRef = useRef(null);
+  const resizeRef = useRef(null);
+  const restoreBoundsRef = useRef(bounds);
 
-  // `playSound` is an effect event and intentionally omitted from deps.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-    setPos(initialPosition);
-  }, [initialPosition]);
+    setBounds(clampWindowBounds({
+      x: initialPosition.x,
+      y: initialPosition.y,
+      width: initialSize.width,
+      height: initialSize.height,
+    }, taskbarHeight));
+    setIsMaximized(false);
+  }, [initialPosition, initialSize, taskbarHeight]);
 
-  // `playSound` is an effect event and intentionally omitted from deps.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     const handleMouseMove = (e) => {
-      if (!isDragging) return;
+      if (dragRef.current) {
+        const nextBounds = clampWindowBounds({
+          ...dragRef.current.startBounds,
+          x: dragRef.current.startBounds.x + (e.clientX - dragRef.current.startX),
+          y: dragRef.current.startBounds.y + (e.clientY - dragRef.current.startY),
+        }, taskbarHeight);
 
-      const nextX = e.clientX - offset.current.x;
-      const nextY = e.clientY - offset.current.y;
-      const maxX = Math.max(0, window.innerWidth - WINDOW_WIDTH);
-      const maxY = Math.max(0, window.innerHeight - WINDOW_HEIGHT - taskbarHeight);
+        setBounds((prev) => ({ ...prev, x: nextBounds.x, y: nextBounds.y }));
+        return;
+      }
 
-      setPos({
-        x: Math.min(Math.max(0, nextX), maxX),
-        y: Math.min(Math.max(0, nextY), maxY),
-      });
+      if (!resizeRef.current) return;
+
+      const { direction, startBounds, startX, startY } = resizeRef.current;
+      const deltaX = e.clientX - startX;
+      const deltaY = e.clientY - startY;
+      let nextBounds = { ...startBounds };
+
+      if (direction.includes('right')) {
+        nextBounds.width = startBounds.width + deltaX;
+      }
+      if (direction.includes('bottom')) {
+        nextBounds.height = startBounds.height + deltaY;
+      }
+      if (direction.includes('left')) {
+        nextBounds.x = startBounds.x + deltaX;
+        nextBounds.width = startBounds.width - deltaX;
+      }
+      if (direction.includes('top')) {
+        nextBounds.y = startBounds.y + deltaY;
+        nextBounds.height = startBounds.height - deltaY;
+      }
+
+      if (nextBounds.width < MIN_WINDOW_WIDTH) {
+        if (direction.includes('left')) {
+          nextBounds.x -= MIN_WINDOW_WIDTH - nextBounds.width;
+        }
+        nextBounds.width = MIN_WINDOW_WIDTH;
+      }
+
+      if (nextBounds.height < MIN_WINDOW_HEIGHT) {
+        if (direction.includes('top')) {
+          nextBounds.y -= MIN_WINDOW_HEIGHT - nextBounds.height;
+        }
+        nextBounds.height = MIN_WINDOW_HEIGHT;
+      }
+
+      setBounds(clampWindowBounds(nextBounds, taskbarHeight));
     };
 
-    const handleMouseUp = () => setIsDragging(false);
+    const handleMouseUp = () => {
+      dragRef.current = null;
+      resizeRef.current = null;
+    };
 
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
@@ -159,31 +352,83 @@ function Window({ id, title, icon, children, onClose, onFocus, zIndex, active, i
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDragging, taskbarHeight]);
+  }, [taskbarHeight]);
 
-  const handleMouseDown = (e) => {
+  useEffect(() => {
+    const handleResize = () => {
+      setBounds((prev) => (
+        isMaximized
+          ? getMaximizedBounds(taskbarHeight)
+          : clampWindowBounds(prev, taskbarHeight)
+      ));
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [isMaximized, taskbarHeight]);
+
+  const beginDrag = (e) => {
+    if (isMaximized) return;
     e.preventDefault();
     onFocus(id);
-    setIsDragging(true);
-    offset.current = {
-      x: e.clientX - pos.x,
-      y: e.clientY - pos.y,
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startBounds: bounds,
     };
   };
 
+  const beginResize = (direction) => (e) => {
+    if (isMaximized) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onFocus(id);
+    resizeRef.current = {
+      direction,
+      startX: e.clientX,
+      startY: e.clientY,
+      startBounds: bounds,
+    };
+  };
+
+  const toggleMaximize = (e) => {
+    e.stopPropagation();
+    if (isMaximized) {
+      setBounds(clampWindowBounds(restoreBoundsRef.current, taskbarHeight));
+      setIsMaximized(false);
+      return;
+    }
+
+    restoreBoundsRef.current = bounds;
+    setBounds(getMaximizedBounds(taskbarHeight));
+    setIsMaximized(true);
+  };
+
+  const resizeHandles = [
+    { direction: 'top', className: 'absolute top-0 left-2 right-2 h-1 cursor-ns-resize' },
+    { direction: 'bottom', className: 'absolute bottom-0 left-2 right-2 h-1 cursor-ns-resize' },
+    { direction: 'left', className: 'absolute left-0 top-2 bottom-2 w-1 cursor-ew-resize' },
+    { direction: 'right', className: 'absolute right-0 top-2 bottom-2 w-1 cursor-ew-resize' },
+    { direction: 'top-left', className: 'absolute top-0 left-0 w-3 h-3 cursor-nwse-resize' },
+    { direction: 'top-right', className: 'absolute top-0 right-0 w-3 h-3 cursor-nesw-resize' },
+    { direction: 'bottom-left', className: 'absolute bottom-0 left-0 w-3 h-3 cursor-nesw-resize' },
+    { direction: 'bottom-right', className: 'absolute bottom-0 right-0 w-3 h-3 cursor-nwse-resize' },
+  ];
+
   return (
     <div
-      className={`absolute shadow-2xl border-2 border-[#0054E3] rounded-t-lg bg-[#ECE9D8] flex flex-col overflow-hidden ${active ? 'ring-1 ring-blue-400' : ''}`}
-      style={{ left: pos.x, top: pos.y, width: WINDOW_WIDTH, height: WINDOW_HEIGHT, zIndex }}
+      className={`absolute shadow-2xl border-2 border-[#0054E3] ${isMaximized ? '' : 'rounded-t-lg'} bg-[#ECE9D8] flex flex-col overflow-hidden ${active ? 'ring-1 ring-blue-400' : ''}`}
+      style={{ left: bounds.x, top: bounds.y, width: bounds.width, height: bounds.height, zIndex }}
       onMouseDown={() => onFocus(id)}
     >
       <div
-        onMouseDown={handleMouseDown}
-        className={`flex items-center justify-between p-1 select-none cursor-move ${active ? 'bg-gradient-to-r from-[#0058EE] to-[#378DFF]' : 'bg-gray-400'}`}
+        onMouseDown={beginDrag}
+        onDoubleClick={toggleMaximize}
+        className={`flex items-center justify-between p-1 select-none ${isMaximized ? 'cursor-default' : 'cursor-move'} ${active ? 'bg-gradient-to-r from-[#0058EE] to-[#378DFF]' : 'bg-gray-400'}`}
       >
-        <div className="flex items-center gap-2 text-white font-bold text-sm px-2">
+        <div className="flex items-center gap-2 text-white font-bold text-sm px-2 min-w-0">
           <span>{icon}</span>
-          <span className="drop-shadow-md">{title}</span>
+          <span className="drop-shadow-md truncate">{title}</span>
         </div>
         <div className="flex gap-1 pr-1">
           <button
@@ -192,6 +437,14 @@ function Window({ id, title, icon, children, onClose, onFocus, zIndex, active, i
             onClick={(e) => e.stopPropagation()}
           >
             _
+          </button>
+          <button
+            type="button"
+            className="w-5 h-5 bg-[#0054E3] border border-white text-white flex items-center justify-center text-[10px] hover:bg-blue-400 font-bold"
+            onClick={toggleMaximize}
+            aria-label={isMaximized ? 'Restaurar janela' : 'Maximizar janela'}
+          >
+            {isMaximized ? '❐' : '□'}
           </button>
           <button
             type="button"
@@ -208,6 +461,13 @@ function Window({ id, title, icon, children, onClose, onFocus, zIndex, active, i
       <div className="flex-1 bg-white overflow-auto relative">
         {children}
       </div>
+      {!isMaximized && resizeHandles.map((handle) => (
+        <div
+          key={handle.direction}
+          className={handle.className}
+          onMouseDown={beginResize(handle.direction)}
+        />
+      ))}
     </div>
   );
 }
@@ -226,11 +486,22 @@ export default function WindowsXP() {
   const [wallpaper, setWallpaper] = useState('bliss');
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [controlMessage, setControlMessage] = useState('Use os botoes para ajustar o sistema.');
+  const [userDocuments, setUserDocuments] = useState(() => loadStoredItems(USER_DOCUMENTS_KEY));
+  const [recycleBinItems, setRecycleBinItems] = useState(() => loadStoredItems(RECYCLE_BIN_KEY));
   const [notepadState, setNotepadState] = useState({
-    title: 'Notepad',
-    content: localStorage.getItem('xp_notepad') || '',
-    filePath: null,
+    title: 'Sem titulo.txt',
+    content: '',
+    fileId: null,
+    fileOrigin: 'draft',
     loading: false,
+    statusMessage: 'Pronto',
+  });
+  const [browserState, setBrowserState] = useState(() => {
+    const initialTab = createBrowserTab();
+    return {
+      activeTabId: initialTab.id,
+      tabs: [initialTab],
+    };
   });
   const nextZIndex = useRef(INITIAL_Z_INDEX);
   const soundCacheRef = useRef({});
@@ -257,6 +528,14 @@ export default function WindowsXP() {
     const timer = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem(USER_DOCUMENTS_KEY, JSON.stringify(userDocuments));
+  }, [userDocuments]);
+
+  useEffect(() => {
+    localStorage.setItem(RECYCLE_BIN_KEY, JSON.stringify(recycleBinItems));
+  }, [recycleBinItems]);
 
   useEffect(() => {
     if (screen !== 'boot') return undefined;
@@ -313,18 +592,117 @@ export default function WindowsXP() {
   }, [shutdownComplete]);
 
   const resetDesktopState = () => {
+    const initialTab = createBrowserTab();
     setWindows([]);
     setActiveWindow(null);
     setIsStartOpen(false);
     setExplorerView('root');
     setControlMessage('Use os botoes para ajustar o sistema.');
     setNotepadState({
-      title: 'Notepad',
-      content: localStorage.getItem('xp_notepad') || '',
-      filePath: null,
+      title: 'Sem titulo.txt',
+      content: '',
+      fileId: null,
+      fileOrigin: 'draft',
       loading: false,
+      statusMessage: 'Pronto',
+    });
+    setBrowserState({
+      activeTabId: initialTab.id,
+      tabs: [initialTab],
     });
     nextZIndex.current = INITIAL_Z_INDEX;
+  };
+
+  const updateBrowserTab = (tabId, updater) => {
+    setBrowserState((prev) => ({
+      ...prev,
+      tabs: prev.tabs.map((tab, index) => (
+        tab.id === tabId ? updater(tab, index) : tab
+      )),
+    }));
+  };
+
+  const activeBrowserTab = browserState.tabs.find((tab) => tab.id === browserState.activeTabId) || browserState.tabs[0];
+
+  const setBrowserAddressInput = (tabId, value) => {
+    updateBrowserTab(tabId, (tab) => ({ ...tab, addressInput: value }));
+  };
+
+  const navigateBrowserTab = (tabId, destination) => {
+    const normalizedUrl = normalizeBrowserDestination(destination);
+
+    setBrowserState((prev) => ({
+      ...prev,
+      tabs: prev.tabs.map((tab, index) => {
+        if (tab.id !== tabId) return tab;
+
+        const nextHistory = tab.history.slice(0, tab.historyIndex + 1);
+        nextHistory.push(normalizedUrl);
+
+        return {
+          ...tab,
+          addressInput: normalizedUrl,
+          currentUrl: normalizedUrl,
+          history: nextHistory,
+          historyIndex: nextHistory.length - 1,
+          title: getBrowserTabTitle(normalizedUrl, index),
+        };
+      }),
+    }));
+  };
+
+  const moveBrowserHistory = (tabId, direction) => {
+    setBrowserState((prev) => ({
+      ...prev,
+      tabs: prev.tabs.map((tab, index) => {
+        if (tab.id !== tabId) return tab;
+
+        const nextIndex = tab.historyIndex + direction;
+        if (nextIndex < 0 || nextIndex >= tab.history.length) {
+          return tab;
+        }
+
+        const nextUrl = tab.history[nextIndex];
+        return {
+          ...tab,
+          historyIndex: nextIndex,
+          currentUrl: nextUrl,
+          addressInput: nextUrl,
+          title: getBrowserTabTitle(nextUrl, index),
+        };
+      }),
+    }));
+  };
+
+  const createNewBrowserTab = (destination = DEFAULT_BROWSER_HOME) => {
+    setBrowserState((prev) => {
+      const newTab = createBrowserTab(destination, prev.tabs.length);
+      return {
+        activeTabId: newTab.id,
+        tabs: [...prev.tabs, newTab],
+      };
+    });
+  };
+
+  const closeBrowserTab = (tabId) => {
+    setBrowserState((prev) => {
+      if (prev.tabs.length === 1) {
+        const replacementTab = createBrowserTab();
+        return {
+          activeTabId: replacementTab.id,
+          tabs: [replacementTab],
+        };
+      }
+
+      const closingIndex = prev.tabs.findIndex((tab) => tab.id === tabId);
+      const nextTabs = prev.tabs.filter((tab) => tab.id !== tabId);
+      const fallbackTab = nextTabs[Math.max(0, closingIndex - 1)] || nextTabs[0];
+
+      return {
+        activeTabId: prev.activeTabId === tabId ? fallbackTab.id : prev.activeTabId,
+        tabs: nextTabs,
+      };
+    });
   };
 
   const openWindow = (type) => {
@@ -341,6 +719,7 @@ export default function WindowsXP() {
       type,
       zIndex: nextZIndex.current,
       initialPosition: createWindowPosition(windows.length),
+      initialSize: createWindowSize(type),
     };
 
     setWindows((prev) => [...prev, newWindow]);
@@ -363,20 +742,37 @@ export default function WindowsXP() {
 
   const openBlankNotepad = () => {
     setNotepadState({
-      title: 'Notepad',
-      content: localStorage.getItem('xp_notepad') || '',
-      filePath: null,
+      title: 'Sem titulo.txt',
+      content: '',
+      fileId: null,
+      fileOrigin: 'draft',
       loading: false,
+      statusMessage: 'Novo arquivo',
     });
     openWindow(PROGRAMS.NOTEPAD);
   };
 
   const openDocument = async (file) => {
+    if (file.source === 'user') {
+      setNotepadState({
+        title: file.name,
+        content: file.content,
+        fileId: file.id,
+        fileOrigin: 'user',
+        loading: false,
+        statusMessage: 'Arquivo carregado de Meus Documentos',
+      });
+      openWindow(PROGRAMS.NOTEPAD);
+      return;
+    }
+
     setNotepadState({
       title: file.name,
       content: 'Carregando arquivo...',
-      filePath: file.path,
+      fileId: null,
+      fileOrigin: 'builtin',
       loading: true,
+      statusMessage: 'Abrindo arquivo',
     });
     openWindow(PROGRAMS.NOTEPAD);
 
@@ -386,15 +782,19 @@ export default function WindowsXP() {
       setNotepadState({
         title: file.name,
         content: text,
-        filePath: file.path,
+        fileId: null,
+        fileOrigin: 'builtin',
         loading: false,
+        statusMessage: 'Arquivo somente leitura carregado',
       });
     } catch (error) {
       setNotepadState({
         title: file.name,
         content: 'Nao foi possivel abrir este arquivo.',
-        filePath: file.path,
+        fileId: null,
+        fileOrigin: 'builtin',
         loading: false,
+        statusMessage: 'Falha ao abrir o arquivo',
       });
     }
   };
@@ -429,11 +829,110 @@ export default function WindowsXP() {
   };
 
   const handleNotepadChange = (value) => {
-    setNotepadState((prev) => ({ ...prev, content: value }));
+    setNotepadState((prev) => ({ ...prev, content: value, statusMessage: 'Editando...' }));
+  };
 
-    if (!notepadState.filePath) {
-      localStorage.setItem('xp_notepad', value);
+  const saveNotepadDocument = () => {
+    const rawName = notepadState.fileId && notepadState.fileOrigin === 'user'
+      ? notepadState.title
+      : window.prompt('Nome do arquivo:', notepadState.title === 'Sem titulo.txt' ? 'Novo arquivo.txt' : notepadState.title);
+
+    if (rawName == null) return;
+
+    const fileName = sanitizeFileName(rawName);
+    if (!fileName) {
+      setNotepadState((prev) => ({ ...prev, statusMessage: 'Nome de arquivo invalido' }));
+      return;
     }
+
+    const timestamp = new Date().toISOString();
+
+    setUserDocuments((prev) => {
+      const duplicate = prev.find((doc) => doc.name.toLowerCase() === fileName.toLowerCase() && doc.id !== notepadState.fileId);
+      if (duplicate) {
+        setNotepadState((current) => ({ ...current, statusMessage: 'Ja existe um arquivo com esse nome' }));
+        return prev;
+      }
+
+      if (notepadState.fileId && notepadState.fileOrigin === 'user') {
+        return prev.map((doc) => (
+          doc.id === notepadState.fileId
+            ? { ...doc, name: fileName, content: notepadState.content, updatedAt: timestamp }
+            : doc
+        ));
+      }
+
+      const newDocument = {
+        id: Date.now() + Math.floor(Math.random() * 1000),
+        name: fileName,
+        content: notepadState.content,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+
+      setNotepadState((current) => ({
+        ...current,
+        title: newDocument.name,
+        fileId: newDocument.id,
+        fileOrigin: 'user',
+        statusMessage: 'Arquivo salvo em Meus Documentos',
+      }));
+
+      return [...prev, newDocument];
+    });
+
+    if (notepadState.fileId && notepadState.fileOrigin === 'user') {
+      setNotepadState((prev) => ({
+        ...prev,
+        title: fileName,
+        statusMessage: 'Alteracoes salvas em Meus Documentos',
+      }));
+    }
+  };
+
+  const deleteUserDocument = (documentId) => {
+    const documentToDelete = userDocuments.find((doc) => doc.id === documentId);
+    if (!documentToDelete) return;
+
+    setUserDocuments((prev) => prev.filter((doc) => doc.id !== documentId));
+    setRecycleBinItems((prev) => [
+      {
+        ...documentToDelete,
+        deletedAt: new Date().toISOString(),
+      },
+      ...prev,
+    ]);
+
+    if (notepadState.fileId === documentId) {
+      setNotepadState({
+        title: 'Sem titulo.txt',
+        content: '',
+        fileId: null,
+        fileOrigin: 'draft',
+        loading: false,
+        statusMessage: 'O arquivo aberto foi movido para a Lixeira',
+      });
+    }
+  };
+
+  const restoreRecycleBinItem = (documentId) => {
+    const item = recycleBinItems.find((doc) => doc.id === documentId);
+    if (!item) return;
+
+    setRecycleBinItems((prev) => prev.filter((doc) => doc.id !== documentId));
+    setUserDocuments((prev) => {
+      const nameExists = prev.some((doc) => doc.name.toLowerCase() === item.name.toLowerCase());
+      const restoredName = nameExists ? sanitizeFileName(`${item.name.replace(/\.txt$/i, '')} restaurado.txt`) : item.name;
+      return [...prev, { ...item, name: restoredName, updatedAt: new Date().toISOString() }];
+    });
+  };
+
+  const deletePermanently = (documentId) => {
+    setRecycleBinItems((prev) => prev.filter((doc) => doc.id !== documentId));
+  };
+
+  const emptyRecycleBin = () => {
+    setRecycleBinItems([]);
   };
 
   const openControlPanel = () => {
@@ -465,43 +964,53 @@ export default function WindowsXP() {
   };
 
   const handleClearNotepad = () => {
-    localStorage.removeItem('xp_notepad');
     setNotepadState({
-      title: 'Notepad',
+      title: 'Sem titulo.txt',
       content: '',
-      filePath: null,
+      fileId: null,
+      fileOrigin: 'draft',
       loading: false,
+      statusMessage: 'Bloco de Notas limpo',
     });
     setControlMessage('As anotacoes locais do Bloco de Notas foram limpas.');
   };
+
+  const allDocuments = [
+    ...DOCUMENT_FILES.map((file) => ({ ...file, source: 'builtin', canDelete: false })),
+    ...userDocuments.map((file) => ({
+      ...file,
+      icon: '📄',
+      source: 'user',
+      canDelete: true,
+    })),
+  ];
 
   const renderAppContent = (type) => {
     switch (type) {
       case PROGRAMS.NOTEPAD:
         return (
-          <div className="h-full flex flex-col">
-            <div className="px-3 py-1 text-xs bg-[#ECE9D8] border-b border-[#d2ccb8] text-slate-600">
-              {notepadState.loading ? 'Abrindo documento...' : notepadState.title}
-            </div>
-            <textarea
-              className="w-full h-full p-3 outline-none resize-none font-mono text-sm"
-              placeholder="Digite algo aqui..."
-              value={notepadState.content}
-              onChange={(e) => handleNotepadChange(e.target.value)}
-            />
-          </div>
+          <NotepadWindow
+            notepadState={notepadState}
+            onChangeContent={handleNotepadChange}
+            onNewFile={openBlankNotepad}
+            onSave={saveNotepadDocument}
+          />
         );
       case PROGRAMS.CALC:
         return <Calculator />;
       case PROGRAMS.IE:
         return (
-          <div className="flex flex-col h-full">
-            <div className="bg-[#ECE9D8] p-1 border-b flex gap-2 items-center">
-              <span className="text-xs">Endereco:</span>
-              <input type="text" className="flex-1 border px-2 text-sm" defaultValue="https://www.google.com/webhp?igu=1" />
-            </div>
-            <iframe src="https://www.google.com/webhp?igu=1" className="flex-1 w-full border-none" title="IE Browser" />
-          </div>
+          <BrowserWindow
+            browserState={browserState}
+            activeTab={activeBrowserTab}
+            onSelectTab={(tabId) => setBrowserState((prev) => ({ ...prev, activeTabId: tabId }))}
+            onChangeAddress={setBrowserAddressInput}
+            onNavigate={navigateBrowserTab}
+            onBack={(tabId) => moveBrowserHistory(tabId, -1)}
+            onForward={(tabId) => moveBrowserHistory(tabId, 1)}
+            onNewTab={() => createNewBrowserTab()}
+            onCloseTab={closeBrowserTab}
+          />
         );
       case PROGRAMS.MY_COMPUTER:
         return (
@@ -509,8 +1018,18 @@ export default function WindowsXP() {
             explorerView={explorerView}
             setExplorerView={setExplorerView}
             rootItems={ROOT_ITEMS}
-            documentFiles={DOCUMENT_FILES}
+            documentFiles={allDocuments}
             onOpenDocument={openDocument}
+            onDeleteDocument={deleteUserDocument}
+          />
+        );
+      case PROGRAMS.TRASH:
+        return (
+          <RecycleBinWindow
+            items={recycleBinItems}
+            onRestore={restoreRecycleBinItem}
+            onDeletePermanently={deletePermanently}
+            onEmpty={emptyRecycleBin}
           />
         );
       case PROGRAMS.CONTROL_PANEL:
@@ -540,6 +1059,7 @@ export default function WindowsXP() {
         loginError={loginError}
         onChange={setCredentials}
         onSubmit={handleLoginSubmit}
+        onTurnOff={handleTurnOff}
       />
     );
   }
@@ -566,6 +1086,7 @@ export default function WindowsXP() {
           icon={PROGRAM_ICONS[win.type] || '⚙️'}
           active={activeWindow === win.id}
           initialPosition={win.initialPosition}
+          initialSize={win.initialSize}
           onClose={() => closeWindow(win.id)}
           onFocus={handleFocus}
           zIndex={win.zIndex}
@@ -616,7 +1137,46 @@ export default function WindowsXP() {
   );
 }
 
-function ExplorerWindow({ explorerView, setExplorerView, rootItems, documentFiles, onOpenDocument }) {
+function NotepadWindow({ notepadState, onChangeContent, onNewFile, onSave }) {
+  return (
+    <div className="h-full flex flex-col bg-white">
+      <div className="px-3 py-2 bg-[#ECE9D8] border-b border-[#d2ccb8] flex items-center justify-between gap-3 text-xs">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="px-2 py-1 border border-[#b0a78d] bg-white hover:bg-[#fffceb]"
+            onClick={onNewFile}
+          >
+            Novo
+          </button>
+          <button
+            type="button"
+            className="px-2 py-1 border border-[#b0a78d] bg-white hover:bg-[#fffceb]"
+            onClick={onSave}
+          >
+            Salvar
+          </button>
+        </div>
+        <div className="text-slate-600">
+          {notepadState.loading ? 'Abrindo documento...' : notepadState.statusMessage}
+        </div>
+      </div>
+
+      <div className="px-3 py-1 text-xs bg-[#f7f3e8] border-b border-[#e0d8c4] text-slate-600">
+        {notepadState.title}
+      </div>
+
+      <textarea
+        className="w-full h-full p-3 outline-none resize-none font-mono text-sm"
+        placeholder="Digite algo aqui..."
+        value={notepadState.content}
+        onChange={(e) => onChangeContent(e.target.value)}
+      />
+    </div>
+  );
+}
+
+function ExplorerWindow({ explorerView, setExplorerView, rootItems, documentFiles, onOpenDocument, onDeleteDocument }) {
   const items = explorerView === 'documents' ? documentFiles : rootItems;
 
   return (
@@ -633,31 +1193,213 @@ function ExplorerWindow({ explorerView, setExplorerView, rootItems, documentFile
         <span>{explorerView === 'documents' ? 'Meu Computador > Meus Documentos' : 'Meu Computador'}</span>
       </div>
 
-      <div className="p-4 grid grid-cols-4 gap-4">
+      <div className="p-4 grid grid-cols-1 gap-2">
         {items.map((item) => (
-          <button
+          <div
             key={item.id}
-            type="button"
-            className="flex flex-col items-center gap-1 cursor-pointer hover:bg-blue-100 p-2 text-center rounded"
-            onDoubleClick={() => {
-              if (item.type === 'folder') {
-                setExplorerView('documents');
-                return;
-              }
-
-              onOpenDocument(item);
-            }}
-            onClick={() => {
-              if (item.type === 'folder') {
-                setExplorerView('documents');
-              }
-            }}
+            className="flex items-center justify-between gap-3 hover:bg-blue-50 p-2 rounded border border-transparent hover:border-blue-100"
           >
-            <span className="text-3xl">{item.icon}</span>
-            <span className="text-xs">{item.name}</span>
-          </button>
+            <button
+              type="button"
+              className="flex items-center gap-3 text-left flex-1 min-w-0"
+              onDoubleClick={() => {
+                if (item.type === 'folder') {
+                  setExplorerView('documents');
+                  return;
+                }
+
+                onOpenDocument(item);
+              }}
+              onClick={() => {
+                if (item.type === 'folder') {
+                  setExplorerView('documents');
+                }
+              }}
+            >
+              <span className="text-3xl shrink-0">{item.icon}</span>
+              <div className="min-w-0">
+                <div className="text-sm truncate">{item.name}</div>
+                {item.source === 'user' && <div className="text-[11px] text-slate-500">Arquivo salvo pelo usuario</div>}
+                {item.source === 'builtin' && <div className="text-[11px] text-slate-500">Arquivo padrao do sistema</div>}
+              </div>
+            </button>
+
+            {item.canDelete && (
+              <button
+                type="button"
+                className="px-2 py-1 text-xs border border-[#b45858] bg-[#fff0f0] text-[#8b2323] hover:bg-[#ffe2e2]"
+                onClick={() => onDeleteDocument(item.id)}
+              >
+                Excluir
+              </button>
+            )}
+          </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function RecycleBinWindow({ items, onRestore, onDeletePermanently, onEmpty }) {
+  return (
+    <div className="h-full flex flex-col bg-white">
+      <div className="px-3 py-2 bg-[#ECE9D8] border-b border-[#d2ccb8] flex items-center justify-between gap-3 text-xs">
+        <span>Lixeira</span>
+        <button
+          type="button"
+          className="px-2 py-1 border border-[#b0a78d] bg-white hover:bg-[#fffceb] disabled:opacity-40"
+          onClick={onEmpty}
+          disabled={items.length === 0}
+        >
+          Esvaziar lixeira
+        </button>
+      </div>
+
+      {items.length === 0 ? (
+        <div className="flex-1 flex items-center justify-center text-sm text-slate-500">
+          A Lixeira esta vazia.
+        </div>
+      ) : (
+        <div className="p-4 flex flex-col gap-2">
+          {items.map((item) => (
+            <div key={item.id} className="flex items-center justify-between gap-3 p-2 border border-slate-200 rounded hover:bg-slate-50">
+              <div className="min-w-0">
+                <div className="text-sm truncate">{item.name}</div>
+                <div className="text-[11px] text-slate-500">
+                  Excluido em {new Date(item.deletedAt).toLocaleString()}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  className="px-2 py-1 text-xs border border-[#6a8f4e] bg-[#eef8e2] text-[#35561d] hover:bg-[#e0f1cd]"
+                  onClick={() => onRestore(item.id)}
+                >
+                  Restaurar
+                </button>
+                <button
+                  type="button"
+                  className="px-2 py-1 text-xs border border-[#b45858] bg-[#fff0f0] text-[#8b2323] hover:bg-[#ffe2e2]"
+                  onClick={() => onDeletePermanently(item.id)}
+                >
+                  Excluir definitivo
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BrowserWindow({
+  browserState,
+  activeTab,
+  onSelectTab,
+  onChangeAddress,
+  onNavigate,
+  onBack,
+  onForward,
+  onNewTab,
+  onCloseTab,
+}) {
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (!activeTab) return;
+    onNavigate(activeTab.id, activeTab.addressInput);
+  };
+
+  if (!activeTab) {
+    return <div className="p-4 text-sm text-slate-600">Nenhuma aba aberta.</div>;
+  }
+
+  return (
+    <div className="h-full flex flex-col bg-[#F3F0E2]">
+      <div className="flex items-end gap-1 px-2 pt-2 bg-[#E7E1CD] border-b border-[#cfc4a6] overflow-x-auto">
+        {browserState.tabs.map((tab) => (
+          <div
+            key={tab.id}
+            className={`min-w-[140px] max-w-[220px] flex items-center gap-2 px-3 py-2 border border-b-0 rounded-t-md text-xs cursor-pointer ${
+              tab.id === activeTab.id ? 'bg-white border-[#cfc4a6]' : 'bg-[#ddd4bc] border-[#beb396]'
+            }`}
+            onClick={() => onSelectTab(tab.id)}
+          >
+            <span className="truncate flex-1">{tab.title}</span>
+            <button
+              type="button"
+              className="w-4 h-4 text-[10px] border border-[#8d8168] bg-[#f7f1df] hover:bg-[#fff8eb]"
+              onClick={(e) => {
+                e.stopPropagation();
+                onCloseTab(tab.id);
+              }}
+              aria-label={`Fechar ${tab.title}`}
+            >
+              x
+            </button>
+          </div>
+        ))}
+
+        <button
+          type="button"
+          className="mb-1 px-2 py-1 text-xs border border-[#8d8168] bg-[#f7f1df] hover:bg-[#fff8eb]"
+          onClick={onNewTab}
+        >
+          + Nova aba
+        </button>
+      </div>
+
+      <div className="px-2 py-2 border-b border-[#d8cfb8] bg-[#ECE9D8]">
+        <div className="flex gap-1 mb-2">
+          <button
+            type="button"
+            className="px-2 py-1 text-xs border border-[#8d8168] bg-white disabled:opacity-40"
+            onClick={() => onBack(activeTab.id)}
+            disabled={activeTab.historyIndex === 0}
+          >
+            Voltar
+          </button>
+          <button
+            type="button"
+            className="px-2 py-1 text-xs border border-[#8d8168] bg-white disabled:opacity-40"
+            onClick={() => onForward(activeTab.id)}
+            disabled={activeTab.historyIndex >= activeTab.history.length - 1}
+          >
+            Avancar
+          </button>
+          <button
+            type="button"
+            className="px-2 py-1 text-xs border border-[#8d8168] bg-white hover:bg-[#fff8eb]"
+            onClick={() => window.open(activeTab.currentUrl, '_blank', 'noopener,noreferrer')}
+          >
+            Abrir fora
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="flex gap-2 items-center">
+          <span className="text-xs shrink-0">Endereco ou busca:</span>
+          <input
+            type="text"
+            className="flex-1 border border-[#9f9376] px-2 py-1 text-sm bg-white"
+            value={activeTab.addressInput}
+            onChange={(e) => onChangeAddress(activeTab.id, e.target.value)}
+            placeholder="Digite um link ou pesquise no Google"
+          />
+          <button
+            type="submit"
+            className="px-3 py-1 text-xs border border-[#8d8168] bg-white hover:bg-[#fff8eb]"
+          >
+            Ir
+          </button>
+        </form>
+      </div>
+
+      <div className="px-3 py-1 text-[11px] text-slate-600 bg-[#f8f4ea] border-b border-[#e4dbc6]">
+        Alguns sites podem bloquear exibicao no navegador embutido. Quando isso acontecer, use "Abrir fora".
+      </div>
+
+      <iframe src={activeTab.currentUrl} className="flex-1 w-full border-none bg-white" title={`IE Browser - ${activeTab.title}`} />
     </div>
   );
 }
@@ -725,7 +1467,7 @@ function BootScreen() {
   );
 }
 
-function LoginScreen({ credentials, loginError, onChange, onSubmit }) {
+function LoginScreen({ credentials, loginError, onChange, onSubmit, onTurnOff }) {
   return (
     <div className="h-screen w-screen overflow-hidden bg-gradient-to-b from-[#0b3d91] via-[#1f69cf] to-[#7db9ff] flex flex-col justify-between font-sans">
       <div className="flex-1 flex items-center justify-center px-6">
@@ -772,7 +1514,14 @@ function LoginScreen({ credentials, loginError, onChange, onSubmit }) {
 
             {loginError && <p className="mt-3 text-sm text-red-600">{loginError}</p>}
 
-            <div className="mt-6 flex justify-end">
+            <div className="mt-6 flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={onTurnOff}
+                className="px-5 py-2 rounded border border-[#8d8168] bg-gradient-to-b from-[#f6f2e8] to-[#d8cfb8] text-[#4c4332] font-semibold shadow hover:brightness-105"
+              >
+                Desligar
+              </button>
               <button
                 type="submit"
                 className="px-5 py-2 rounded bg-gradient-to-b from-[#4ea1ff] to-[#005be3] text-white font-semibold shadow hover:brightness-110"
